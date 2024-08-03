@@ -4,25 +4,25 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 const axios = require('axios');
 const NodeCache = require('node-cache');
-const fs = require('fs').promises; 
+const fs = require('fs').promises; // Use the promise-based API
+const cron = require('node-cron');
 const logger = require('./logger');
 
 const app = express();
 
 // Load environment variables
 const PORT = process.env.PORT || 3000;
-const RATE_LIMIT_WINDOW = parseInt(process.env.RATE_LIMIT_WINDOW, 10) * 60 * 1000 || 60000; 
-const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX, 10) || 5; 
-const CACHE_DURATION = parseInt(process.env.CACHE_DURATION, 10) || 60; 
+const RATE_LIMIT_WINDOW = parseInt(process.env.RATE_LIMIT_WINDOW, 10) * 60 * 1000 || 60000; // Default to 1 minute
+const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX, 10) || 10; // Default to 10 requests
+const CACHE_DURATION = parseInt(process.env.CACHE_DURATION, 10) || 60; // Default to 60 seconds
 const API_URL = process.env.API_URL || 'https://jsonplaceholder.typicode.com/todos';
 
-// Set up rate limiter to limit requests to 5 per minute per IP address
+// Set up rate limiter
 const limiter = rateLimit({
   windowMs: RATE_LIMIT_WINDOW,
   max: RATE_LIMIT_MAX,
   message: 'Too many requests, please try again later.',
   headers: true,
-  keyGenerator: (req) => req.ip 
 });
 
 // Set up cache with a duration of CACHE_DURATION seconds
@@ -31,6 +31,8 @@ const cache = new NodeCache({ stdTTL: CACHE_DURATION });
 // Apply rate limiter to all requests, except for cached responses
 app.use((req, res, next) => {
   if (req.url === '/proxy' && cache.has('todos')) {
+    // If the request is for the /proxy endpoint and the response is cached,
+    // skip the rate limiter middleware
     return next();
   }
   limiter(req, res, next);
@@ -42,6 +44,20 @@ app.use((req, res, next) => {
   logger.info(`[${new Date().toISOString()}] ${req.ip} ${req.method} ${req.originalUrl} - Rate Limit Remaining: ${rateLimitStatus}`);
   next();
 });
+
+// Function to fetch and store data
+const fetchDataAndStore = async () => {
+  try {
+    const response = await axios.get(API_URL);
+    const data = response.data;
+    await fs.writeFile('data.json', JSON.stringify(data, null, 2));
+    logger.info('Data fetched and stored successfully');
+  } catch (error) {
+    logger.error(`Error fetching data from API: ${error.message}`);
+  }
+};
+
+
 
 // Proxy endpoint
 app.get('/proxy', async (req, res, next) => {
@@ -68,7 +84,7 @@ app.get('/proxy', async (req, res, next) => {
       logger.info('Serving from local storage');
       return res.json({
         data: jsonData,
-        cacheFlag: true,
+        cacheFlag: false,
       });
     } catch (error) {
       logger.error('Error reading local data file, fetching from API:', error.message);
@@ -80,22 +96,18 @@ app.get('/proxy', async (req, res, next) => {
         params: req.query,
       });
       cache.set(cacheKey, response.data);
-
-      // Store data to local file
-      await fs.writeFile('data.json', JSON.stringify(response.data, null, 2));
-      logger.info('Data fetched from API and stored in local file');
-
-      res.json({
+      logger.info('Serving from API');
+      return res.json({
         data: response.data,
         cacheFlag: false, // Set cacheFlag to false when fetching from API
       });
     } catch (error) {
       logger.error(`Error fetching data from API: ${error.message}`);
-      next(new Error('Error fetching data from API')); 
+      next(new Error('Error fetching data from API')); // Pass error to centralized error handler
     }
   } catch (error) {
     logger.error(`Error interacting with cache: ${error.message}`);
-    next(new Error('Error interacting with cache')); 
+    next(new Error('Error interacting with cache')); // Pass error to centralized error handler
   }
 });
 
